@@ -1,3 +1,5 @@
+chmod +x ~/catkin_ws/src/icp_lidar_processing/src/mpu6050_lidar.py
+
 import rospy
 import numpy as np
 from sensor_msgs.msg import PointCloud2
