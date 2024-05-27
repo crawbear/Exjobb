@@ -150,12 +150,8 @@ while True:
     if filtered_points_2d.ndim == 1:
         filtered_points_2d = filtered_points_2d.reshape(-1, 2)
 
-    # Plot filtered 2D point cloud
-    plt.scatter(filtered_points_2d[:, 0], filtered_points_2d[:, 1])
-    plt.xlabel('Distans')
-    plt.ylabel('Djup')
-    plt.title('Filtrerat 2D punkt diagram')
-    plt.show()
+    
+    
 
     # Apply moving window filter
     def moving_window_filter(points, window_size=2, threshold=0.06):
