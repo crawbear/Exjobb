@@ -1,0 +1,69 @@
+import rospy
+import open3d as o3d
+import numpy as np
+from sensor_msgs.msg import PointCloud2
+import sensor_msgs.point_cloud2 as pc2
+from mpu6050 import mpu6050
+
+class ICPNode:
+    def __init__(self):
+        rospy.init_node('icp_node', anonymous=True)
+        self.prev_cloud = None
+        self.current_cloud = None
+        self.transformation = np.identity(4)  # Initial transformation matrix (identity)
+
+        self.sub_current = rospy.Subscriber('current_cloud', PointCloud2, self.current_callback)
+        self.pub_aligned = rospy.Publisher('aligned_cloud', PointCloud2, queue_size=1)
+
+        self.sensor = mpu6050(0x68)
+
+    def current_callback(self, msg):
+        self.current_cloud = self.convert_point_cloud(msg)
+        self.align_clouds()
+
+    def convert_point_cloud(self, ros_pc2):
+        points_list = []
+        for point in pc2.read_points(ros_pc2, skip_nans=True):
+            points_list.append([point[0], point[1], point[2]])
+        return o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(points_list)))
+
+    def align_clouds(self):
+        if self.prev_cloud is None or self.current_cloud is None:
+            self.prev_cloud = self.current_cloud
+            return
+
+        voxel_size = 0.05  # Adjust voxel size based on your data
+        prev_down = self.prev_cloud.voxel_down_sample(voxel_size)
+        current_down = self.current_cloud.voxel_down_sample(voxel_size)
+
+        icp_result = o3d.pipelines.registration.registration_icp(
+            current_down, prev_down, max_correspondence_distance=voxel_size * 2.5,
+            init=self.transformation,
+            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+            criteria=o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=200)
+        )
+
+        self.transformation = icp_result.transformation
+        aligned_cloud = current_down.transform(self.transformation)
+        self.publish_aligned_cloud(aligned_cloud)
+
+        # Update previous cloud
+        self.prev_cloud = self.current_cloud
+
+    def publish_aligned_cloud(self, aligned_cloud):
+        ros_cloud = self.convert_to_ros_point_cloud2(aligned_cloud)
+        self.pub_aligned.publish(ros_cloud)
+
+    def convert_to_ros_point_cloud2(self, cloud):
+        points = np.asarray(cloud.points)
+        header = rospy.Header()
+        header.stamp = rospy.Time.now()
+        header.frame_id = 'map'
+        return pc2.create_cloud_xyz32(header, points)
+
+    def run(self):
+        rospy.spin()
+
+if __name__ == '__main__':
+    node = ICPNode()
+    node.run()
