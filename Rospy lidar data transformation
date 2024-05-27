@@ -1,160 +1,116 @@
-from mpu6050 import mpu6050
-import numpy as np
 import rospy
+import numpy as np
 from sensor_msgs.msg import PointCloud2
 import sensor_msgs.point_cloud2 as pc2
-import time
+from mpu6050 import mpu6050
 import matplotlib.pyplot as plt
 from scipy.spatial import ConvexHull
+import time
 
-# Initialize MPU6050
-sensor = mpu6050(0x68)
-
-# Complementary filter parameters
-alpha = 0.98  # Complementary filter coefficient
-dt = 0.01  # Time step, adjust as needed
-
-# Initial angles
-gyro_angle_x = 0.0
-gyro_angle_y = 0.0
-comp_angle_x = 0.0
-comp_angle_y = 0.0
-last_time = time.time()
-
-def read_tilt_angles():
-    global gyro_angle_x, gyro_angle_y, comp_angle_x, comp_angle_y, last_time
-
-    accel_data = sensor.get_accel_data()
-    gyro_data = sensor.get_gyro_data()
-
-    # Accelerometer angles
-    ax = accel_data['x']
-    ay = accel_data['y']
-    az = accel_data['z']
-    accel_angle_x = np.arctan2(ay, az) * 180 / np.pi
-    accel_angle_y = np.arctan2(ax, az) * 180 / np.pi
-
-    # Gyroscope angles
-    gx = gyro_data['x']
-    gy = gyro_data['y']
-    gz = gyro_data['z']
-    current_time = time.time()
-    dt = current_time - last_time
-    last_time = current_time
-    gyro_angle_x += gx * dt
-    gyro_angle_y += gy * dt
-
-    # Complementary filter to combine gyro and accelerometer angles
-    comp_angle_x = alpha * (comp_angle_x + gx * dt) + (1 - alpha) * accel_angle_x
-    comp_angle_y = alpha * (comp_angle_y + gy * dt) + (1 - alpha) * accel_angle_y
-
-    return comp_angle_x, comp_angle_y
-
-def extract_bulk_points_from_lidar():
-    # Initialize ROS node (if not already initialized)
-    if not rospy.core.is_initialized():
-        rospy.init_node('lidar_data_extractor', anonymous=True)
-
-    # Placeholder for the extracted points
-    points = []
-
-    # Callback function to process LIDAR data
-    def pointcloud_callback(data):
-        nonlocal points
+class LidarTiltProcessor:
+    def __init__(self):
+        # Initialize MPU6050
+        self.sensor = mpu6050(0x68)
+        
+        # Complementary filter parameters
+        self.alpha = 0.98  # Complementary filter coefficient
+        self.dt = 0.01  # Time step, adjust as needed
+        
+        # Initial angles
+        self.gyro_angle_x = 0.0
+        self.gyro_angle_y = 0.0
+        self.comp_angle_x = 0.0
+        self.comp_angle_y = 0.0
+        self.last_time = time.time()
+        
+        # Placeholder for the extracted points
+        self.points = []
+        
+        # Initialize ROS node
+        rospy.init_node('lidar_tilt_processor', anonymous=True)
+        
+        # Subscribe to the LIDAR data topic
+        rospy.Subscriber("/lidar_topic", PointCloud2, self.pointcloud_callback)
+        
+        # Wait until the first point cloud is received
+        rospy.sleep(1)
+    
+    def read_tilt_angles(self):
+        accel_data = self.sensor.get_accel_data()
+        gyro_data = self.sensor.get_gyro_data()
+        
+        # Accelerometer angles
+        ax = accel_data['x']
+        ay = accel_data['y']
+        az = accel_data['z']
+        accel_angle_x = np.arctan2(ay, az) * 180 / np.pi
+        accel_angle_y = np.arctan2(ax, az) * 180 / np.pi
+        
+        # Gyroscope angles
+        gx = gyro_data['x']
+        gy = gyro_data['y']
+        gz = gyro_data['z']
+        current_time = time.time()
+        dt = current_time - self.last_time
+        self.last_time = current_time
+        self.gyro_angle_x += gx * dt
+        self.gyro_angle_y += gy * dt
+        
+        # Complementary filter to combine gyro and accelerometer angles
+        self.comp_angle_x = self.alpha * (self.comp_angle_x + gx * dt) + (1 - self.alpha) * accel_angle_x
+        self.comp_angle_y = self.alpha * (self.comp_angle_y + gy * dt) + (1 - self.alpha) * accel_angle_y
+        
+        return self.comp_angle_x, self.comp_angle_y
+    
+    def pointcloud_callback(self, data):
         # Convert PointCloud2 message to a list of tuples
         point_list = list(pc2.read_points(data, field_names=("x", "y", "z"), skip_nans=True))
-        points = np.array(point_list)
-
-    # Subscribe to the LIDAR data topic
-    rospy.Subscriber("/lidar_topic", PointCloud2, pointcloud_callback)
-
-    # Wait for LIDAR data to be received
-    while not points:
-        rospy.sleep(0.1)
-
-    return points
-
-# Function to rotate points based on tilt angles
-def rotate_points_tilt(points, tilt_angle_x, tilt_angle_y):
-    """Rotate points around the given axis by the specified tilt angle."""
-    tilt_angle_x_rad = np.radians(tilt_angle_x)
-    tilt_angle_y_rad = np.radians(tilt_angle_y)
-
-    rotation_matrix_x = np.array([
-        [1, 0, 0],
-        [0, np.cos(tilt_angle_x_rad), -np.sin(tilt_angle_x_rad)],
-        [0, np.sin(tilt_angle_x_rad), np.cos(tilt_angle_x_rad)]
-    ])
-
-    rotation_matrix_y = np.array([
-        [np.cos(tilt_angle_y_rad), 0, np.sin(tilt_angle_y_rad)],
-        [0, 1, 0],
-        [-np.sin(tilt_angle_y_rad), 0, np.cos(tilt_angle_y_rad)]
-    ])
-
-    points = np.dot(points, rotation_matrix_x.T)
-    points = np.dot(points, rotation_matrix_y.T)
-
-    return points
-
-# 3D to 2D transformation with new tilt angles
-def transform_coordinates(points_3d, baseline_3d, tilt_angle_x, tilt_angle_y):
-    """Transform 3D points to 2D considering tilt."""
-    transformed_points = []
-    points_3d = rotate_points_tilt(points_3d, tilt_angle_x, tilt_angle_y)
-    baseline_3d = rotate_points_tilt(baseline_3d, tilt_angle_x, tilt_angle_y)
-
-    for point, baseline in zip(points_3d, baseline_3d):
-        x, y, z = point
-        _, _, baseline_z = baseline
-        distance = np.sqrt(x ** 2 + y ** 2)
-        depth = z - baseline_z  # Calculate depth from baseline
-        transformed_points.append((distance, depth))
-
-    return np.array(transformed_points)
-
-# Main processing pipeline
-while True:
-    # Read tilt angles from MPU6050
-    tilt_x, tilt_y = read_tilt_angles()
-
-    # Extract bulk points from LIDAR data
-    bulk_points = extract_bulk_points_from_lidar()
-
-    # Simulated container points (can be replaced with actual container data if available)
-    length = LIDAR_x  # meters
-    width = LIDAR_y  # meters
-    height = LIDAR_z  # meters
-    # container_points = generate_bulk_flow_points(length, width, height, num_points=1000)
-
-    # Transform coordinates to 2D
-    points_2d = transform_coordinates(bulk_points, container_points, tilt_x, tilt_y)
-
-    # Plot 2D point cloud
-    plt.scatter(points_2d[:, 0], points_2d[:, 1])
-    plt.xlabel('Distance (Y)')
-    plt.ylabel('Depth (Z)')
-    plt.title('2D Point Cloud')
-    plt.show()
-
-    # Apply Pauta criterion filter
-    def pauta_criterion_filter(points_2d, threshold=3):
+        self.points = np.array(point_list)
+    
+    def rotate_points_tilt(self, points, tilt_angle_x, tilt_angle_y):
+        """Rotate points around the given axis by the specified tilt angle."""
+        tilt_angle_x_rad = np.radians(tilt_angle_x)
+        tilt_angle_y_rad = np.radians(tilt_angle_y)
+        
+        rotation_matrix_x = np.array([
+            [1, 0, 0],
+            [0, np.cos(tilt_angle_x_rad), -np.sin(tilt_angle_x_rad)],
+            [0, np.sin(tilt_angle_x_rad), np.cos(tilt_angle_x_rad)]
+        ])
+        
+        rotation_matrix_y = np.array([
+            [np.cos(tilt_angle_y_rad), 0, np.sin(tilt_angle_y_rad)],
+            [0, 1, 0],
+            [-np.sin(tilt_angle_y_rad), 0, np.cos(tilt_angle_y_rad)]
+        ])
+        
+        points = np.dot(points, rotation_matrix_x.T)
+        points = np.dot(points, rotation_matrix_y.T)
+        
+        return points
+    
+    def transform_coordinates(self, points_3d, baseline_3d, tilt_angle_x, tilt_angle_y):
+        """Transform 3D points to 2D considering tilt."""
+        transformed_points = []
+        points_3d = self.rotate_points_tilt(points_3d, tilt_angle_x, tilt_angle_y)
+        baseline_3d = self.rotate_points_tilt(baseline_3d, tilt_angle_x, tilt_angle_y)
+        
+        for point, baseline in zip(points_3d, baseline_3d):
+            x, y, z = point
+            _, _, baseline_z = baseline
+            distance = np.sqrt(x ** 2 + y ** 2)
+            depth = z - baseline_z  # Calculate depth from baseline
+            transformed_points.append((distance, depth))
+        
+        return np.array(transformed_points)
+    
+    def pauta_criterion_filter(self, points_2d, threshold=3):
         mean = np.mean(points_2d[:, 1])
         std_dev = np.std(points_2d[:, 1])
         filtered_points = points_2d[np.abs(points_2d[:, 1] - mean) <= threshold * std_dev]
         return filtered_points
-
-    filtered_points_2d = pauta_criterion_filter(points_2d)
-
-    # Ensure filtered_points_2d remains 2D
-    if filtered_points_2d.ndim == 1:
-        filtered_points_2d = filtered_points_2d.reshape(-1, 2)
-
     
-    
-
-    # Apply moving window filter
-    def moving_window_filter(points, window_size=2, threshold=0.06):
+    def moving_window_filter(self, points, window_size=2, threshold=0.06):
         filtered_points = []
         for i in range(len(points) - window_size + 1):
             window = points[i:i + window_size]
@@ -163,38 +119,76 @@ while True:
             if max_z - min_z < threshold:
                 filtered_points.append(window[window_size // 2])
         return np.array(filtered_points)
+    
+    def process(self):
+        while not rospy.is_shutdown():
+            if self.points is None or len(self.points) == 0:
+                rospy.sleep(0.1)
+                continue
+            
+            # Read tilt angles from MPU6050
+            tilt_x, tilt_y = self.read_tilt_angles()
+            
+            # Simulated container points (can be replaced with actual container data if available)
+            # Assuming a dummy baseline for the container points
+            baseline_3d = np.zeros_like(self.points)  # Replace with actual container data
+            
+            # Transform coordinates to 2D
+            points_2d = self.transform_coordinates(self.points, baseline_3d, tilt_x, tilt_y)
+            
+            # Plot 2D point cloud, Tas bort ifall man ej vill se plots.
+            plt.scatter(points_2d[:, 0], points_2d[:, 1])
+            plt.xlabel('Distance (Y)')
+            plt.ylabel('Depth (Z)')
+            plt.title('2D Point Cloud')
+            plt.show()
+            
+            # Apply Pauta criterion filter
+            filtered_points_2d = self.pauta_criterion_filter(points_2d)
+            
+            # Ensure filtered_points_2d remains 2D
+            if filtered_points_2d.ndim == 1:
+                filtered_points_2d = filtered_points_2d.reshape(-1, 2)
+            
+            # Apply moving window filter
+            contour_points_2d = self.moving_window_filter(filtered_points_2d)
+            
+            # Ensure contour_points_2d remains 2D
+            if contour_points_2d.ndim == 1:
+                contour_points_2d = contour_points_2d.reshape(-1, 2)
+            
+            # Plot contour points
+            plt.scatter(contour_points_2d[:, 0], contour_points_2d[:, 1], color='red')
+            plt.xlabel('Distance (Y)')
+            plt.ylabel('Depth (Z)')
+            plt.title('Contour Points')
+            plt.show()
+            
+            # Calculate and plot the convex hull
+            if len(contour_points_2d) >= 3:
+                hull = ConvexHull(contour_points_2d)
+                
+                # Plot contour with convex hull, Plots kan tas bort för snabbare processering. 
+                plt.scatter(contour_points_2d[:, 0], contour_points_2d[:, 1], label='Contour Points', color='red')
+                for simplex in hull.simplices:
+                    plt.plot(contour_points_2d[simplex, 0], contour_points_2d[simplex, 1], 'k-')
+                
+                plt.xlabel('Distance (Y)')
+                plt.ylabel('Height (Z)')
+                plt.legend()
+                plt.title('2D Contour of Bulk Material')
+                plt.show()
+                
+                print(f"Contour surface area: {hull.area / 5} m²")  # Adjust this as needed
+            else:
+                print("Not enough points to form a convex hull.")
+            
+            # Sleep for a while before the next iteration
+            time.sleep(1)
 
-    contour_points_2d = moving_window_filter(filtered_points_2d)
-
-    # Ensure contour_points_2d remains 2D
-    if contour_points_2d.ndim == 1:
-        contour_points_2d = contour_points_2d.reshape(-1, 2)
-
-    # Plot contour points
-    plt.scatter(contour_points_2d[:, 0], contour_points_2d[:, 1], color='red')
-    plt.xlabel('Distans (Y)')
-    plt.ylabel('Djup (Z)')
-    plt.title('Kontur punkter')
-    plt.show()
-
-    # Calculate and plot the convex hull
-    if len(contour_points_2d) >= 3:
-        hull = ConvexHull(contour_points_2d)
-
-        # Plot contour with convex hull
-        plt.scatter(contour_points_2d[:, 0], contour_points_2d[:, 1], label='Kontur punkter', color='red')
-        for simplex in hull.simplices:
-            plt.plot(contour_points_2d[simplex, 0], contour_points_2d[simplex, 1], 'k-')
-
-        plt.xlabel('Distans (Y)')
-        plt.ylabel('Höjd (Z)')
-        plt.legend()
-        plt.title('2D Kontur av Bulk Material')
-        plt.show()
-
-        print(f"Kontur ytarea: {hull.area / 5} m²")  # Korrigering
-    else:
-        print("Not enough points to form a convex hull.")
-
-    # Sleep for a while before the next iteration
-    time.sleep(1)
+if __name__ == '__main__':
+    processor = LidarTiltProcessor()
+    try:
+        processor.process()
+    except rospy.ROSInterruptException:
+        pass
